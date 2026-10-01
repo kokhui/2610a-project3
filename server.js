@@ -518,14 +518,16 @@ const MIME = {
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
-    let size = 0;
+    let size = 0, tooLarge = false;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > 100_000) { reject(new HttpError(413, 'Request too large')); req.destroy(); }
+      // Stop buffering but leave the socket open, so the 413 reaches the client before the connection closes.
+      if (size > 100_000) { if (!tooLarge) { tooLarge = true; reject(new HttpError(413, 'Request too large')); } }
       else chunks.push(c);
     });
     req.on('end', () => {
+      if (tooLarge) return;
       if (!chunks.length) return resolve({});
       try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
       catch { reject(new HttpError(400, 'Invalid JSON')); }
@@ -588,6 +590,7 @@ const server = http.createServer(async (req, res) => {
     fail(404, 'Not found');
   } catch (e) {
     if (!(e instanceof HttpError)) console.error(e);
+    if (e.status === 413) res.setHeader('Connection', 'close');
     sendJSON(res, e.status || 500, { error: e.status ? e.message : 'Something went wrong' });
   }
 });
