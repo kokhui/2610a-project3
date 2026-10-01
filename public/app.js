@@ -101,7 +101,18 @@ async function route() {
     app.innerHTML = `<div class="card empty"><p>${esc(e.message)}</p><a class="btn" href="#/">Back to home</a></div>`;
   }
 }
-window.addEventListener('hashchange', route);
+// After a navigation the old view is gone, so move focus somewhere sensible:
+// the selected tab when switching tabs in a group, otherwise the view's heading.
+window.addEventListener('hashchange', async (e) => {
+  const view = (url) => new URL(url).hash.replace(/^(#\/g\/\d+).*/, '$1');
+  await route();
+  const target = view(e.oldURL) === view(e.newURL)
+    ? $('[role=tab][aria-selected="true"]')
+    : $('h1', app);
+  if (!target) return;
+  if (target.tagName === 'H1') target.tabIndex = -1;
+  target.focus();
+});
 
 $('#logout').addEventListener('click', async () => {
   await api('POST', '/api/logout').catch(() => {});
