@@ -74,6 +74,21 @@ describe('accounts', () => {
     assert.equal((await anon.get('/api/me')).status, 401);
   });
 
+  test('a malformed cookie from another app does not break the API', async () => {
+    const c = await newUser(base);
+    const sid = c.cookie;
+    c.cookie = `other=%E0%A4%A; ${sid}; theme=dark`;
+    assert.equal((await c.get('/api/me')).data.user.id, c.user.id);
+
+    const anon = client(base);
+    anon.cookie = 'other=%';
+    assert.equal((await anon.get('/api/me')).status, 401);
+    await anon.post('/api/register', { username: 'cookiejar', password: 'secret123' });
+    anon.cookie = 'other=%';
+    const r = await anon.post('/api/login', { username: 'cookiejar', password: 'secret123' });
+    assert.equal(r.status, 200);
+  });
+
   test('PATCH /api/me updates the profile and strips junk from the phone number', async () => {
     const c = await newUser(base);
     const r = await c.patch('/api/me', { displayName: ' Alice T ', phone: '+65 9123-4567 ext' });
