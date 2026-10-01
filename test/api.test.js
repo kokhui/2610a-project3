@@ -284,6 +284,9 @@ describe('expenses', () => {
       [{ ...ok, amount: '-5' }, 'Enter an amount like 12.50'],
       [{ ...ok, amount: '12345678' }, 'Enter an amount like 12.50'],
       [{ ...ok, amount: undefined }, 'Enter an amount like 12.50'],
+      [{ ...ok, amount: '0' }, 'The amount must be more than 0'],
+      [{ ...ok, amount: '0.00' }, 'The amount must be more than 0'],
+      [{ ...ok, amount: '0', splitMode: 'exact', shares: { [a.user.id]: '0' } }, 'The amount must be more than 0'],
       [{ ...ok, paidBy: b.user.id }, 'The payer must be in the group'],
       [{ ...ok, splitAmong: [] }, 'Pick at least one person to split with'],
       [{ ...ok, splitAmong: [b.user.id] }, 'Pick at least one person to split with'],
@@ -364,6 +367,9 @@ describe('settlements', () => {
       assert.equal(r.data.error, 'Pick two different people in the group');
     }
     assert.equal((await b.post(url, { from: b.user.id, to: a.user.id, amount: 'lots' })).status, 400);
+    r = await b.post(url, { from: b.user.id, to: a.user.id, amount: '0' });
+    assert.equal(r.status, 400);
+    assert.equal(r.data.error, 'The amount must be more than 0');
 
     // Partial payment.
     r = await b.post(url, { from: b.user.id, to: a.user.id, amount: '20' });

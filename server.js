@@ -124,6 +124,13 @@ function toCents(value) {
   return Number(m[1]) * 100 + Number((m[2] || '').padEnd(2, '0'));
 }
 
+// Bill totals and repayments must be above zero (the schema CHECKs this too). Exact-split shares may be 0.
+function toPositiveCents(value) {
+  const cents = toCents(value);
+  if (cents === 0) fail(400, 'The amount must be more than 0');
+  return cents;
+}
+
 function newInviteCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   for (;;) {
@@ -428,7 +435,7 @@ route('POST', '/api/groups/:id/expenses', ({ user, params, body }) => {
   const g = requireMember(params.id, user.id);
   const ids = memberIds(g.id);
   const description = cleanText(body.description, 'Description', 80);
-  const amount = toCents(body.amount);
+  const amount = toPositiveCents(body.amount);
   const paidBy = Number(body.paidBy);
   if (!ids.has(paidBy)) fail(400, 'The payer must be in the group');
   const spentOn = /^\d{4}-\d{2}-\d{2}$/.test(body.spentOn || '') ? body.spentOn : new Date().toISOString().slice(0, 10);
@@ -494,7 +501,7 @@ route('POST', '/api/groups/:id/settlements', ({ user, params, body }) => {
   const from = Number(body.from), to = Number(body.to);
   if (!ids.has(from) || !ids.has(to) || from === to) fail(400, 'Pick two different people in the group');
   if (user.id !== from && user.id !== to) fail(403, 'You can only record payments you made or received');
-  const amount = toCents(body.amount);
+  const amount = toPositiveCents(body.amount);
   const { lastInsertRowid } = q(`INSERT INTO settlements (group_id, from_user, to_user, amount_cents, created_by)
                                  VALUES (?, ?, ?, ?, ?)`).run(g.id, from, to, amount, user.id);
   return { id: Number(lastInsertRowid) };
