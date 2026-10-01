@@ -13,7 +13,15 @@ let me = null;
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+const { parseCents, MAX, MIN_PASSWORD } = SHARED;
+
+// money() is unsigned: callers say who owes whom in words, or use signedMoney() / balanceSpan().
 const money = (cents) => 'S$' + (Math.abs(cents) / 100).toFixed(2);
+const signedMoney = (c) => (c > 0 ? '+' : c < 0 ? '−' : '') + money(c);
+const toneClass = (c) => (c > 0 ? 'owed' : c < 0 ? 'owe' : 'muted');
+// pos/neg receive the formatted unsigned amount; zero is the text for an even balance.
+const balanceSpan = (c, { pos, neg, zero }) =>
+  `<span class="${toneClass(c)}">${c > 0 ? pos(money(c)) : c < 0 ? neg(money(c)) : zero}</span>`;
 const centsToInput = (cents) => (cents / 100).toFixed(2);
 const initials = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || '?';
 const today = () => new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD in local time
@@ -21,12 +29,6 @@ const today = () => new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD in loc
 function fmtDate(iso) {
   const d = new Date(iso.length === 10 ? iso + 'T00:00:00' : iso.replace(' ', 'T') + 'Z');
   return d.toLocaleDateString('en-SG', { day: 'numeric', month: 'short', year: d.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
-}
-
-// "12.5" -> 1250, or NaN. Mirrors the server's parser.
-function parseCents(s) {
-  const m = /^(\d{1,7})(?:\.(\d{1,2}))?$/.exec(String(s).trim());
-  return m ? Number(m[1]) * 100 + Number((m[2] || '').padEnd(2, '0')) : NaN;
 }
 
 async function api(method, url, body) {
@@ -49,6 +51,15 @@ function toast(msg) {
   t.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
+}
+
+// For buttons and inline forms: run the request, toast on success, then refresh. Failures go to a toast.
+async function act(request, okMsg, then) {
+  try {
+    await request();
+    if (okMsg) toast(okMsg);
+    then?.();
+  } catch (ex) { toast(ex.message); }
 }
 
 async function copy(text, label = 'Copied') {
@@ -141,7 +152,7 @@ function renderAuth() {
               <label for="password">Password</label>
               <input id="password" name="password" type="password" required
                 autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}">
-              ${mode === 'register' ? '<p class="muted small" style="margin:.3rem 0 0">At least 6 characters.</p>' : ''}
+              ${mode === 'register' ? `<p class="muted small" style="margin:.3rem 0 0">At least ${MIN_PASSWORD} characters.</p>` : ''}
             </div>
             <div class="error" id="auth-error"></div>
             <button class="primary" style="width:100%;margin-top:.5rem">${mode === 'login' ? 'Log in' : 'Create account'}</button>
@@ -187,8 +198,7 @@ async function renderHome() {
             <span class="avatar">${esc(initials(f.displayName))}</span>
             <span class="grow"><strong>${esc(f.displayName)}</strong><br>
               <span class="muted small">${f.groups.map((g) => `${esc(g.name)}: ${g.cents > 0 ? 'owes you' : 'you owe'} ${money(g.cents)}`).join(' · ')}</span></span>
-            <span class="amount num">${f.netCents > 0 ? `<span class="owed">owes you ${money(f.netCents)}</span>`
-              : f.netCents < 0 ? `<span class="owe">you owe ${money(f.netCents)}</span>` : '<span class="muted">evens out</span>'}</span>
+            <span class="amount num">${balanceSpan(f.netCents, { pos: (m) => `owes you ${m}`, neg: (m) => `you owe ${m}`, zero: 'evens out' })}</span>
           </div>
           <div class="row wrap" style="margin-top:.5rem;padding-left:50px">
             <button class="small primary" data-settle-friend="${i}">${f.netCents > 0 ? `Got ${money(f.netCents)} back` : f.netCents < 0 ? `I paid ${money(f.netCents)}` : 'Clear it'}</button>
@@ -223,7 +233,7 @@ async function renderHome() {
   $('#new-group').addEventListener('click', () => openSheet(`
     <h2>New group</h2>
     <div class="field"><label for="g-name">Group name</label>
-      <input id="g-name" name="name" placeholder="e.g. Friday supper crew" maxlength="60" required></div>
+      <input id="g-name" name="name" placeholder="e.g. Friday supper crew" maxlength="${MAX.groupName}" required></div>
     <div class="error"></div>
     <div class="sheet-actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary">Create</button></div>`,
     async (fd) => { const { id } = await api('POST', '/api/groups', { name: fd.get('name') }); location.hash = `#/g/${id}`; }));
@@ -238,11 +248,7 @@ async function renderHome() {
     async (fd) => { const { id } = await api('POST', '/api/groups/join', { code: fd.get('code') }); location.hash = `#/g/${id}`; }));
 }
 
-function balanceLabel(c) {
-  if (c > 0) return `<span class="owed">owed ${money(c)}</span>`;
-  if (c < 0) return `<span class="owe">you owe ${money(c)}</span>`;
-  return '<span class="muted">settled</span>';
-}
+const balanceLabel = (c) => balanceSpan(c, { pos: (m) => `owed ${m}`, neg: (m) => `you owe ${m}`, zero: 'settled' });
 
 async function joinByCode(code) {
   const { id } = await api('POST', '/api/groups/join', { code });
@@ -254,11 +260,10 @@ async function joinByCode(code) {
 
 async function renderGroup(id, tab) {
   const data = await api('GET', `/api/groups/${id}`);
-  const { group, members, expenses, settlements, balances, transfers } = data;
+  const { group, members, expenses, balances } = data;
   const byId = new Map(members.map((m) => [m.id, m]));
   const name = (uid) => (uid === me.id ? 'You' : byId.get(uid)?.displayName ?? 'Someone');
   const myBal = balances[me.id] || 0;
-  const joinLink = `${location.origin}${location.pathname}#/join/${group.inviteCode}`;
 
   const tabs = [['balances', 'Who owes who'], ['bills', `Bills (${expenses.length})`], ['people', `People (${members.length})`]];
 
@@ -277,159 +282,156 @@ async function renderGroup(id, tab) {
   $$('[data-tab]').forEach((b) => b.addEventListener('click', () => { location.hash = `#/g/${id}/${b.dataset.tab}`; }));
   $('#add-bill').addEventListener('click', () => billSheet(data, () => renderGroup(id, 'bills')));
 
-  const body = $('#tab-body');
-  const reload = () => renderGroup(id, tab);
+  const ctx = { ...data, id, byId, name, myBal, reload: () => renderGroup(id, tab) };
+  groupTabs[tab]?.($('#tab-body'), ctx);
+}
 
-  if (tab === 'balances') {
-    body.innerHTML = `
-      <div class="card">
-        <h2>Settle up</h2>
-        ${transfers.length ? transfers.map((t, i) => {
-          const mine = t.from === me.id || t.to === me.id;
-          return `<div class="transfer ${t.to === me.id ? 'mine-owed' : ''}">
-            <div class="row between">
-              <div><strong>${esc(name(t.from))}</strong> ${t.from === me.id ? 'owe' : 'owes'} <strong>${esc(name(t.to))}</strong></div>
-              <div class="amount num">${money(t.amountCents)}</div>
-            </div>
-            ${mine ? `<div class="actions">
-              <button class="small primary" data-settle="${i}">${t.from === me.id ? 'I paid this' : 'Mark as received'}</button>
-              ${t.to === me.id ? `<button class="small" data-remind="${i}">Send reminder</button>` : ''}
-            </div>` : ''}
-          </div>`;
-        }).join('') : `<div class="empty"><p>Everyone is square. 🎉</p><p class="small">Add a bill when someone pays for the group.</p></div>`}
-        <p class="muted small" style="margin:.8rem 0 0">This is the fewest number of payments that clears every bill in the group.</p>
-      </div>
-      <div class="card">
-        <h2>Balances</h2>
-        <ul class="list">${members.map((m) => `
-          <li class="row"><span class="avatar">${esc(initials(m.displayName))}</span>
-            <span class="grow">${esc(m.id === me.id ? `${m.displayName} (you)` : m.displayName)}</span>
-            <span class="amount num">${(balances[m.id] || 0) > 0 ? `<span class="owed">gets back ${money(balances[m.id])}</span>`
-              : (balances[m.id] || 0) < 0 ? `<span class="owe">owes ${money(balances[m.id])}</span>` : '<span class="muted">settled</span>'}</span></li>`).join('')}
-        </ul>
-      </div>`;
-    $$('[data-settle]', body).forEach((b) => b.addEventListener('click', () => settleSheet(group, transfers[b.dataset.settle], name, reload)));
-    $$('[data-remind]', body).forEach((b) => b.addEventListener('click', () => {
-      const t = transfers[b.dataset.remind];
-      const recent = expenses
-        .filter((e) => e.paidBy === me.id && e.shares.some((s) => s.userId === t.from))
-        .slice(0, 3)
-        .map((e) => `• ${e.description} (${fmtDate(e.spentOn)}): ${money(e.shares.find((s) => s.userId === t.from).shareCents)}`);
-      remindSheet(byId.get(t.from), t.amountCents, `for "${group.name}"`, recent);
-    }));
+const groupTabs = { balances: renderBalancesTab, bills: renderBillsTab, people: renderPeopleTab };
+
+function renderBalancesTab(body, { group, members, expenses, balances, transfers, byId, name, reload }) {
+  body.innerHTML = `
+    <div class="card">
+      <h2>Settle up</h2>
+      ${transfers.length ? transfers.map((t, i) => {
+        const mine = t.from === me.id || t.to === me.id;
+        return `<div class="transfer ${t.to === me.id ? 'mine-owed' : ''}">
+          <div class="row between">
+            <div><strong>${esc(name(t.from))}</strong> ${t.from === me.id ? 'owe' : 'owes'} <strong>${esc(name(t.to))}</strong></div>
+            <div class="amount num">${money(t.amountCents)}</div>
+          </div>
+          ${mine ? `<div class="actions">
+            <button class="small primary" data-settle="${i}">${t.from === me.id ? 'I paid this' : 'Mark as received'}</button>
+            ${t.to === me.id ? `<button class="small" data-remind="${i}">Send reminder</button>` : ''}
+          </div>` : ''}
+        </div>`;
+      }).join('') : `<div class="empty"><p>Everyone is square. 🎉</p><p class="small">Add a bill when someone pays for the group.</p></div>`}
+      <p class="muted small" style="margin:.8rem 0 0">This is the fewest number of payments that clears every bill in the group.</p>
+    </div>
+    <div class="card">
+      <h2>Balances</h2>
+      <ul class="list">${members.map((m) => `
+        <li class="row"><span class="avatar">${esc(initials(m.displayName))}</span>
+          <span class="grow">${esc(m.id === me.id ? `${m.displayName} (you)` : m.displayName)}</span>
+          <span class="amount num">${balanceSpan(balances[m.id] || 0, { pos: (a) => `gets back ${a}`, neg: (a) => `owes ${a}`, zero: 'settled' })}</span></li>`).join('')}
+      </ul>
+    </div>`;
+  $$('[data-settle]', body).forEach((b) => b.addEventListener('click', () => settleSheet(group, transfers[b.dataset.settle], name, reload)));
+  $$('[data-remind]', body).forEach((b) => b.addEventListener('click', () => {
+    const t = transfers[b.dataset.remind];
+    const recent = expenses
+      .filter((e) => e.paidBy === me.id && e.shares.some((s) => s.userId === t.from))
+      .slice(0, 3)
+      .map((e) => `• ${e.description} (${fmtDate(e.spentOn)}): ${money(e.shares.find((s) => s.userId === t.from).shareCents)}`);
+    remindSheet(byId.get(t.from), t.amountCents, `for "${group.name}"`, recent);
+  }));
+}
+
+// Bills and repayments newest first, each with myNet (how it moved userId's balance) and running (the balance after it).
+function buildTimeline(expenses, settlements, userId) {
+  const items = [
+    ...expenses.map((e) => ({ kind: 'bill', sortKey: e.spentOn + e.createdAt, e })),
+    ...settlements.map((s) => ({ kind: 'pay', sortKey: s.createdAt.slice(0, 10) + s.createdAt, s })),
+  ].sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+  // Walk oldest to newest to accumulate the running balance, then reverse for display.
+  let running = 0;
+  for (const it of items) {
+    it.myNet = it.kind === 'bill'
+      ? (it.e.paidBy === userId ? it.e.amountCents : 0) - (it.e.shares.find((s) => s.userId === userId)?.shareCents || 0)
+      : (it.s.from === userId ? it.s.amountCents : 0) - (it.s.to === userId ? it.s.amountCents : 0);
+    running += it.myNet;
+    it.running = running;
   }
+  return items.reverse();
+}
 
-  if (tab === 'bills') {
-    const items = [
-      ...expenses.map((e) => ({ kind: 'bill', date: e.spentOn, sortKey: e.spentOn + e.createdAt, e })),
-      ...settlements.map((s) => ({ kind: 'pay', date: s.createdAt, sortKey: s.createdAt.slice(0, 10) + s.createdAt, s })),
-    ].sort((a, b) => a.sortKey.localeCompare(b.sortKey));
-    // Walk oldest to newest so each row can show your running balance, then display newest first.
-    let running = 0;
-    for (const it of items) {
-      it.myNet = it.kind === 'bill'
-        ? (it.e.paidBy === me.id ? it.e.amountCents : 0) - (it.e.shares.find((s) => s.userId === me.id)?.shareCents || 0)
-        : (it.s.from === me.id ? it.s.amountCents : 0) - (it.s.to === me.id ? it.s.amountCents : 0);
-      running += it.myNet;
-      it.running = running;
+function renderBillsTab(body, { id, expenses, settlements, name, myBal, reload }) {
+  const items = buildTimeline(expenses, settlements, me.id);
+  const runningLine = (it) => it.myNet
+    ? `<br><span class="small">Your balance: <span class="muted">${signedMoney(it.running - it.myNet)}</span> → <strong class="num ${toneClass(it.running)}">${signedMoney(it.running)}</strong></span>`
+    : '';
+  const bills = items.filter((it) => it.kind === 'bill').length;
+  const pays = items.length - bills;
+  body.innerHTML = `
+    ${items.length ? `<div class="card">
+      <div class="row between"><h2 style="margin:0">Your balance here</h2>
+        <strong class="num ${toneClass(myBal)}" style="font-size:1.3rem">${signedMoney(myBal)}</strong></div>
+      <p class="muted small" style="margin:.4rem 0 0">All ${bills} ${bills === 1 ? 'bill' : 'bills'}${pays ? ` and ${pays} ${pays === 1 ? 'repayment' : 'repayments'}` : ''} added together:
+        what you paid for others minus what others paid for you. ${myBal > 0 ? 'Positive means the group owes you.' : myBal < 0 ? 'Negative means you owe the group.' : ''}
+        Each row shows how it moved your balance.</p>
+    </div>` : ''}
+    <div class="card">${items.length ? `<ul class="list">${items.map((it) => {
+    if (it.kind === 'pay') {
+      const s = it.s;
+      return `<li class="row"><span class="avatar" aria-hidden="true">💸</span>
+        <span class="grow"><strong>${esc(name(s.from))}</strong> paid <strong>${esc(name(s.to))}</strong><br>
+          <span class="muted small">${fmtDate(s.createdAt)} · ${s.combined ? 'cleared in a combined settle-up' : 'repayment'}</span>${runningLine(it)}</span>
+        <span class="amount num">${money(s.amountCents)}<br>
+          ${[s.from, s.to].includes(me.id) ? `<button class="link small" data-undo="${s.id}">Undo</button>` : ''}</span></li>`;
     }
-    items.reverse();
-    const signed = (c) => (c > 0 ? '+' : c < 0 ? '−' : '') + money(c);
-    const runningLine = (it) => it.myNet
-      ? `<br><span class="small">Your balance: <span class="muted">${signed(it.running - it.myNet)}</span> → <strong class="num ${it.running > 0 ? 'owed' : it.running < 0 ? 'owe' : ''}">${signed(it.running)}</strong></span>`
-      : '';
-    const bills = items.filter((it) => it.kind === 'bill').length;
-    const pays = items.length - bills;
-    body.innerHTML = `
-      ${items.length ? `<div class="card">
-        <div class="row between"><h2 style="margin:0">Your balance here</h2>
-          <strong class="num" style="font-size:1.3rem">${myBal > 0 ? `<span class="owed">+${money(myBal)}</span>` : myBal < 0 ? `<span class="owe">−${money(myBal)}</span>` : '<span class="muted">S$0.00</span>'}</strong></div>
-        <p class="muted small" style="margin:.4rem 0 0">All ${bills} ${bills === 1 ? 'bill' : 'bills'}${pays ? ` and ${pays} ${pays === 1 ? 'repayment' : 'repayments'}` : ''} added together:
-          what you paid for others minus what others paid for you. ${myBal > 0 ? 'Positive means the group owes you.' : myBal < 0 ? 'Negative means you owe the group.' : ''}
-          Each row shows how it moved your balance.</p>
-      </div>` : ''}
-      <div class="card">${items.length ? `<ul class="list">${items.map((it) => {
-      if (it.kind === 'pay') {
-        const s = it.s;
-        return `<li class="row"><span class="avatar" aria-hidden="true">💸</span>
-          <span class="grow"><strong>${esc(name(s.from))}</strong> paid <strong>${esc(name(s.to))}</strong><br>
-            <span class="muted small">${fmtDate(s.createdAt)} · ${s.note === 'Combined settle-up' ? 'cleared in a combined settle-up' : 'repayment'}</span>${runningLine(it)}</span>
-          <span class="amount num">${money(s.amountCents)}<br>
-            ${[s.from, s.to].includes(me.id) ? `<button class="link small" data-undo="${s.id}">Undo</button>` : ''}</span></li>`;
-      }
-      const e = it.e;
-      const myNet = it.myNet;
-      const split = e.shares.map((s) => `${esc(name(s.userId))} ${money(s.shareCents)}`).join(', ');
-      return `<li class="row"><span class="avatar" aria-hidden="true">🧾</span>
-        <span class="grow"><strong>${esc(e.description)}</strong><br>
-          <span class="muted small">${fmtDate(e.spentOn)} · ${esc(name(e.paidBy))} paid ${money(e.amountCents)}</span><br>
-          <span class="muted small">Split: ${split}</span>${runningLine(it)}</span>
-        <span class="amount num small">${myNet > 0 ? `<span class="owed">you lent ${money(myNet)}</span>`
-          : myNet < 0 ? `<span class="owe">you borrowed ${money(myNet)}</span>` : '<span class="muted">not involved</span>'}<br>
-          ${[e.paidBy, e.createdBy].includes(me.id) ? `<button class="link small" data-del="${e.id}">Delete</button>` : ''}</span></li>`;
-    }).join('')}</ul>` : `<div class="empty"><p>No bills yet.</p><p class="small">Tap <strong>+ Add bill</strong> right after someone pays, so nobody forgets the amount.</p></div>`}</div>`;
+    const e = it.e;
+    const split = e.shares.map((s) => `${esc(name(s.userId))} ${money(s.shareCents)}`).join(', ');
+    return `<li class="row"><span class="avatar" aria-hidden="true">🧾</span>
+      <span class="grow"><strong>${esc(e.description)}</strong><br>
+        <span class="muted small">${fmtDate(e.spentOn)} · ${esc(name(e.paidBy))} paid ${money(e.amountCents)}</span><br>
+        <span class="muted small">Split: ${split}</span>${runningLine(it)}</span>
+      <span class="amount num small">${balanceSpan(it.myNet, { pos: (a) => `you lent ${a}`, neg: (a) => `you borrowed ${a}`, zero: 'not involved' })}<br>
+        ${[e.paidBy, e.createdBy].includes(me.id) ? `<button class="link small" data-del="${e.id}">Delete</button>` : ''}</span></li>`;
+  }).join('')}</ul>` : `<div class="empty"><p>No bills yet.</p><p class="small">Tap <strong>+ Add bill</strong> right after someone pays, so nobody forgets the amount.</p></div>`}</div>`;
 
-    $$('[data-del]', body).forEach((b) => b.addEventListener('click', async () => {
-      if (!confirm('Delete this bill? Everyone\'s balances will change.')) return;
-      try { await api('DELETE', `/api/groups/${id}/expenses/${b.dataset.del}`); toast('Bill deleted'); reload(); }
-      catch (ex) { toast(ex.message); }
-    }));
-    $$('[data-undo]', body).forEach((b) => b.addEventListener('click', async () => {
-      if (!confirm('Undo this repayment?')) return;
-      try { await api('DELETE', `/api/groups/${id}/settlements/${b.dataset.undo}`); toast('Repayment removed'); reload(); }
-      catch (ex) { toast(ex.message); }
-    }));
-  }
+  $$('[data-del]', body).forEach((b) => b.addEventListener('click', () => {
+    if (!confirm('Delete this bill? Everyone\'s balances will change.')) return;
+    act(() => api('DELETE', `/api/groups/${id}/expenses/${b.dataset.del}`), 'Bill deleted', reload);
+  }));
+  $$('[data-undo]', body).forEach((b) => b.addEventListener('click', () => {
+    if (!confirm('Undo this repayment?')) return;
+    act(() => api('DELETE', `/api/groups/${id}/settlements/${b.dataset.undo}`), 'Repayment removed', reload);
+  }));
+}
 
-  if (tab === 'people') {
-    body.innerHTML = `
-      <div class="card">
-        <h2>Invite friends</h2>
-        <p class="muted small">Friends sign up, then enter this code (or open the link).</p>
-        <div class="invite">
-          <span class="code">${esc(group.inviteCode)}</span>
-          <button class="small" id="copy-code">Copy code</button>
-          <button class="small" id="copy-link">Copy invite link</button>
-        </div>
-        <form id="add-member" class="row" style="margin-top:1rem">
-          <input name="username" placeholder="Or add by username" autocapitalize="none" aria-label="Username to add" required>
-          <button class="primary">Add</button>
-        </form>
+function renderPeopleTab(body, { id, group, members, reload }) {
+  const joinLink = `${location.origin}${location.pathname}#/join/${group.inviteCode}`;
+  body.innerHTML = `
+    <div class="card">
+      <h2>Invite friends</h2>
+      <p class="muted small">Friends sign up, then enter this code (or open the link).</p>
+      <div class="invite">
+        <span class="code">${esc(group.inviteCode)}</span>
+        <button class="small" id="copy-code">Copy code</button>
+        <button class="small" id="copy-link">Copy invite link</button>
       </div>
-      <div class="card">
-        <h2>People</h2>
-        <ul class="list">${members.map((m) => `
-          <li class="row"><span class="avatar">${esc(initials(m.displayName))}</span>
-            <span class="grow">${esc(m.displayName)}${m.id === me.id ? ' <span class="pill">you</span>' : ''}${m.id === group.createdBy ? ' <span class="pill">creator</span>' : ''}<br>
-              <span class="muted small">@${esc(m.username)}</span></span>
-            ${m.id === me.id || group.createdBy === me.id ? `<button class="small danger" data-remove="${m.id}">${m.id === me.id ? 'Leave' : 'Remove'}</button>` : ''}
-          </li>`).join('')}</ul>
-      </div>
-      <div class="card">
-        <h2>Rename group</h2>
-        <form id="rename" class="row"><input name="name" value="${esc(group.name)}" maxlength="60" aria-label="Group name" required><button>Save</button></form>
-      </div>`;
-    $('#copy-code').addEventListener('click', () => copy(group.inviteCode, 'Invite code copied'));
-    $('#copy-link').addEventListener('click', () => copy(`Join "${group.name}" on SplitLah: ${joinLink}`, 'Invite link copied'));
-    $('#add-member').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      try { await api('POST', `/api/groups/${id}/members`, { username: new FormData(e.target).get('username') }); toast('Added'); reload(); }
-      catch (ex) { toast(ex.message); }
-    });
-    $('#rename').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      try { await api('PATCH', `/api/groups/${id}`, { name: new FormData(e.target).get('name') }); toast('Renamed'); reload(); }
-      catch (ex) { toast(ex.message); }
-    });
-    $$('[data-remove]', body).forEach((b) => b.addEventListener('click', async () => {
-      const leaving = Number(b.dataset.remove) === me.id;
-      if (!confirm(leaving ? 'Leave this group?' : 'Remove this person from the group?')) return;
-      try {
-        await api('DELETE', `/api/groups/${id}/members/${b.dataset.remove}`);
-        if (leaving) location.hash = '#/'; else reload();
-      } catch (ex) { toast(ex.message); }
-    }));
-  }
+      <form id="add-member" class="row" style="margin-top:1rem">
+        <input name="username" placeholder="Or add by username" autocapitalize="none" aria-label="Username to add" required>
+        <button class="primary">Add</button>
+      </form>
+    </div>
+    <div class="card">
+      <h2>People</h2>
+      <ul class="list">${members.map((m) => `
+        <li class="row"><span class="avatar">${esc(initials(m.displayName))}</span>
+          <span class="grow">${esc(m.displayName)}${m.id === me.id ? ' <span class="pill">you</span>' : ''}${m.id === group.createdBy ? ' <span class="pill">creator</span>' : ''}<br>
+            <span class="muted small">@${esc(m.username)}</span></span>
+          ${m.id === me.id || group.createdBy === me.id ? `<button class="small danger" data-remove="${m.id}">${m.id === me.id ? 'Leave' : 'Remove'}</button>` : ''}
+        </li>`).join('')}</ul>
+    </div>
+    <div class="card">
+      <h2>Rename group</h2>
+      <form id="rename" class="row"><input name="name" value="${esc(group.name)}" maxlength="${MAX.groupName}" aria-label="Group name" required><button>Save</button></form>
+    </div>`;
+  $('#copy-code').addEventListener('click', () => copy(group.inviteCode, 'Invite code copied'));
+  $('#copy-link').addEventListener('click', () => copy(`Join "${group.name}" on SplitLah: ${joinLink}`, 'Invite link copied'));
+  $('#add-member').addEventListener('submit', (e) => {
+    e.preventDefault();
+    act(() => api('POST', `/api/groups/${id}/members`, { username: new FormData(e.target).get('username') }), 'Added', reload);
+  });
+  $('#rename').addEventListener('submit', (e) => {
+    e.preventDefault();
+    act(() => api('PATCH', `/api/groups/${id}`, { name: new FormData(e.target).get('name') }), 'Renamed', reload);
+  });
+  $$('[data-remove]', body).forEach((b) => b.addEventListener('click', () => {
+    const leaving = Number(b.dataset.remove) === me.id;
+    if (!confirm(leaving ? 'Leave this group?' : 'Remove this person from the group?')) return;
+    act(() => api('DELETE', `/api/groups/${id}/members/${b.dataset.remove}`), null, () => { if (leaving) location.hash = '#/'; else reload(); });
+  }));
 }
 
 // ---------- bill sheet ----------
@@ -439,7 +441,7 @@ function billSheet({ group, members }, done) {
   openSheet(`
     <h2>Add a bill</h2>
     <div class="field"><label for="b-desc">What was it?</label>
-      <input id="b-desc" name="description" placeholder="e.g. Hotpot at Haidilao" maxlength="80" required></div>
+      <input id="b-desc" name="description" placeholder="e.g. Hotpot at Haidilao" maxlength="${MAX.description}" required></div>
     <div class="fields-2" style="margin-top:.85rem">
       <div><label for="b-amt">Total (S$)</label><input id="b-amt" name="amount" inputmode="decimal" placeholder="0.00" required></div>
       <div><label for="b-date">Date</label><input id="b-date" name="spentOn" type="date" value="${today()}" max="${today()}"></div>
@@ -527,8 +529,8 @@ function settleFriendSheet(f, done) {
     <p>${what}.</p>
     <ul class="list small" style="margin-bottom:.75rem">${f.groups.map((g) => `
       <li class="row between"><span>${esc(g.name)}</span>
-        <span class="num ${g.cents > 0 ? 'owed' : 'owe'}">${g.cents > 0 ? '+' : '−'}${money(g.cents)}</span></li>`).join('')}
-      <li class="row between"><strong>Combined</strong><strong class="num">${f.netCents > 0 ? '+' : f.netCents < 0 ? '−' : ''}${money(f.netCents)}</strong></li>
+        <span class="num ${toneClass(g.cents)}">${signedMoney(g.cents)}</span></li>`).join('')}
+      <li class="row between"><strong>Combined</strong><strong class="num">${signedMoney(f.netCents)}</strong></li>
     </ul>
     <p class="muted small">${n > 1 ? `This records a repayment in each of the ${n} groups, so all of them clear.` : 'This records the repayment in the group.'}
       Only do this once the money has actually changed hands.</p>
@@ -569,7 +571,7 @@ function renderProfile() {
     <h1>Your profile</h1>
     <form class="card" id="profile">
       <div class="field"><label>Username</label><input value="@${esc(me.username)}" disabled></div>
-      <div class="field"><label for="p-name">Your name</label><input id="p-name" name="displayName" value="${esc(me.displayName)}" maxlength="40" required></div>
+      <div class="field"><label for="p-name">Your name</label><input id="p-name" name="displayName" value="${esc(me.displayName)}" maxlength="${MAX.displayName}" required></div>
       <div class="field"><label for="p-phone">Mobile number <span class="muted small">(optional)</span></label>
         <input id="p-phone" name="phone" value="${esc(me.phone)}" inputmode="tel" placeholder="e.g. 91234567">
         <p class="muted small" style="margin:.3rem 0 0">Lets friends WhatsApp you reminders and shows your PayNow number on the reminders you send.</p></div>
