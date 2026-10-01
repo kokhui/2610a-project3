@@ -439,9 +439,12 @@ route('POST', '/api/groups/:id/expenses', ({ user, params, body }) => {
       .map(([uid, v]) => [Number(uid), String(v).trim() === '' ? 0 : toCents(v)])
       .filter(([, c]) => c > 0);
     if (shares.some(([uid]) => !ids.has(uid))) fail(400, 'Everyone in the split must be in the group');
+    // "1" and "01" are different keys but the same person.
+    if (new Set(shares.map(([uid]) => uid)).size !== shares.length) fail(400, 'Each person can only be in the split once');
     const sum = shares.reduce((a, [, c]) => a + c, 0);
     if (sum !== amount) fail(400, `The amounts add up to ${(sum / 100).toFixed(2)}, not ${(amount / 100).toFixed(2)}`);
   } else {
+    if (body.splitAmong !== undefined && !Array.isArray(body.splitAmong)) fail(400, 'Pick at least one person to split with');
     const people = [...new Set((body.splitAmong || []).map(Number))].filter((uid) => ids.has(uid));
     if (!people.length) fail(400, 'Pick at least one person to split with');
     const base = Math.floor(amount / people.length);
@@ -527,8 +530,12 @@ function readBody(req) {
     });
     req.on('end', () => {
       if (!chunks.length) return resolve({});
-      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
-      catch { reject(new HttpError(400, 'Invalid JSON')); }
+      let body;
+      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+      catch { return reject(new HttpError(400, 'Invalid JSON')); }
+      // Handlers read fields off the body, so `null`, arrays and bare values would crash them.
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return reject(new HttpError(400, 'Send a JSON object'));
+      resolve(body);
     });
     req.on('error', reject);
   });
