@@ -6,7 +6,8 @@ When you hang out with friends, one person often pays the whole bill. Later, nob
 - **See who owes whom.** Every group shows each person's balance and the fewest payments needed to settle everything.
 - **Everything nets out.** Bills and repayments in a group add up to one balance per person. The Bills tab shows how each one moved your running total. On the home page, each friend's balance is combined across all your groups, so owing Bob S$100 in one group and being owed S$150 in another shows as "Bob owes you S$50". **Settle all** clears every group with one tap.
 - **Close the loop.** Mark a repayment as paid (partial payments are fine), or send a ready-made WhatsApp reminder that lists the bills and your PayNow number.
-- **Groups with invite codes.** Make a group for each friend circle and share the 6-letter code or link.
+- **Groups with invite codes.** Make a group for each friend circle and share the 6-letter code or link. You can also invite someone by username; they see the invite on their home page and choose whether to join, so nobody ends up in a group (or shares their number) without agreeing.
+- **Opt out of a bill.** Anyone on a bill can take themselves off it. Their share comes off the total, so the payer covers it.
 - **Accounts.** Simple username and password login. Passwords are hashed with scrypt, and sessions use HttpOnly cookies.
 
 ## Run it

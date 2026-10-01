@@ -76,6 +76,13 @@ db.exec(`
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     note         TEXT
   );
+  CREATE TABLE IF NOT EXISTS invites (
+    group_id   INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    invited_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, user_id)
+  );
   CREATE INDEX IF NOT EXISTS idx_expenses_group ON expenses(group_id);
   CREATE INDEX IF NOT EXISTS idx_settlements_group ON settlements(group_id);
 `);
@@ -220,6 +227,13 @@ function requireMember(groupId, userId) {
   return g;
 }
 
+function joinGroup(groupId, userId) {
+  tx(() => {
+    q('INSERT OR IGNORE INTO members (group_id, user_id) VALUES (?, ?)').run(groupId, userId);
+    q('DELETE FROM invites WHERE group_id = ? AND user_id = ?').run(groupId, userId);
+  });
+}
+
 function memberIds(groupId) {
   return new Set(q('SELECT user_id FROM members WHERE group_id = ?').all(groupId).map((r) => r.user_id));
 }
@@ -328,8 +342,27 @@ route('POST', '/api/groups/join', ({ user, body }) => {
   const code = String(body.code || '').trim().toUpperCase();
   const g = q('SELECT id FROM groups WHERE invite_code = ?').get(code);
   if (!g) fail(404, 'No group with that code');
-  q('INSERT OR IGNORE INTO members (group_id, user_id) VALUES (?, ?)').run(g.id, user.id);
+  joinGroup(g.id, user.id);
   return { id: g.id };
+});
+
+// Pending invites for the current user. No phone numbers: those are only shared once someone joins.
+route('GET', '/api/invites', ({ user }) => ({
+  invites: q(`SELECT g.id, g.name, u.display_name, u.username FROM invites i
+              JOIN groups g ON g.id = i.group_id JOIN users u ON u.id = i.invited_by
+              WHERE i.user_id = ? ORDER BY i.created_at DESC`).all(user.id)
+    .map((r) => ({ groupId: r.id, groupName: r.name, invitedBy: { displayName: r.display_name, username: r.username } })),
+}));
+
+route('POST', '/api/invites/:id/accept', ({ user, params }) => {
+  if (!q('SELECT 1 FROM invites WHERE group_id = ? AND user_id = ?').get(params.id, user.id)) fail(404, 'Invite not found');
+  joinGroup(params.id, user.id);
+  return { id: params.id };
+});
+
+route('POST', '/api/invites/:id/decline', ({ user, params }) => {
+  q('DELETE FROM invites WHERE group_id = ? AND user_id = ?').run(params.id, user.id);
+  return { ok: true };
 });
 
 route('GET', '/api/groups/:id', ({ user, params }) => {
@@ -351,10 +384,13 @@ route('GET', '/api/groups/:id', ({ user, params }) => {
     id: s.id, from: s.from_user, to: s.to_user, amountCents: s.amount_cents, createdBy: s.created_by, createdAt: s.created_at,
     combined: s.note === COMBINED_NOTE,
   }));
+  const invited = q(`SELECT u.username, u.display_name FROM invites i JOIN users u ON u.id = i.user_id
+                     WHERE i.group_id = ? ORDER BY i.created_at`).all(g.id)
+    .map((u) => ({ username: u.username, displayName: u.display_name }));
   const bal = groupBalances(g.id);
   return {
     group: { id: g.id, name: g.name, inviteCode: g.invite_code, createdBy: g.created_by },
-    members, expenses, settlements,
+    members, invited, expenses, settlements,
     balances: Object.fromEntries(bal),
     transfers: suggestTransfers(bal),
   };
@@ -366,11 +402,13 @@ route('PATCH', '/api/groups/:id', ({ user, params, body }) => {
   return { ok: true };
 });
 
+// Adding by username only sends an invite: nobody joins a group (or shares their phone number) without accepting.
 route('POST', '/api/groups/:id/members', ({ user, params, body }) => {
   const g = requireMember(params.id, user.id);
   const u = q('SELECT id FROM users WHERE username = ?').get(String(body.username || '').trim());
   if (!u) fail(404, 'No user with that username. Ask them to sign up, or share the invite code.');
-  q('INSERT OR IGNORE INTO members (group_id, user_id) VALUES (?, ?)').run(g.id, u.id);
+  if (memberIds(g.id).has(u.id)) fail(409, 'They are already in this group');
+  q('INSERT OR IGNORE INTO invites (group_id, user_id, invited_by) VALUES (?, ?, ?)').run(g.id, u.id, user.id);
   return { ok: true };
 });
 
@@ -428,6 +466,26 @@ route('DELETE', '/api/groups/:id/expenses/:eid', ({ user, params }) => {
   if (![e.created_by, e.paid_by].includes(user.id)) fail(403, 'Only the person who added or paid this bill can delete it');
   q('DELETE FROM expenses WHERE id = ?').run(e.id);
   return { ok: true };
+});
+
+// Anyone with a share can take themselves off a bill, so nobody is stuck with a bill they didn't agree to.
+// Their share comes off the total, which means the payer covers it.
+route('POST', '/api/groups/:id/expenses/:eid/leave', ({ user, params }) => {
+  const g = requireMember(params.id, user.id);
+  const e = q('SELECT * FROM expenses WHERE id = ? AND group_id = ?').get(params.eid, g.id);
+  if (!e) fail(404, 'Bill not found');
+  const share = q('SELECT share_cents FROM expense_shares WHERE expense_id = ? AND user_id = ?').get(e.id, user.id);
+  if (!share) fail(400, 'You are not part of this bill');
+  return tx(() => {
+    const left = e.amount_cents - share.share_cents;
+    if (left > 0) {
+      q('DELETE FROM expense_shares WHERE expense_id = ? AND user_id = ?').run(e.id, user.id);
+      q('UPDATE expenses SET amount_cents = ? WHERE id = ?').run(left, e.id);
+    } else {
+      q('DELETE FROM expenses WHERE id = ?').run(e.id);
+    }
+    return { deleted: left <= 0 };
+  });
 });
 
 route('POST', '/api/groups/:id/settlements', ({ user, params, body }) => {
@@ -491,7 +549,9 @@ function sendJSON(res, status, data) {
 }
 
 function serveStatic(req, res, pathname) {
-  const rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
+  let rel;
+  try { rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1)); }
+  catch { fail(400, 'Bad URL'); } // e.g. GET /% would otherwise throw a URIError
   const file = path.resolve(PUBLIC_DIR, rel);
   if (!file.startsWith(PUBLIC_DIR + path.sep)) { res.writeHead(403); return res.end(); }
   fs.readFile(file, (err, buf) => {
@@ -505,12 +565,12 @@ function serveStatic(req, res, pathname) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const { pathname } = new URL(req.url, 'http://localhost');
-  if (!pathname.startsWith('/api/')) {
-    if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); return res.end(); }
-    return serveStatic(req, res, pathname);
-  }
   try {
+    const { pathname } = new URL(req.url, 'http://localhost');
+    if (!pathname.startsWith('/api/')) {
+      if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); return res.end(); }
+      return serveStatic(req, res, pathname);
+    }
     // JSON-only writes, so a plain cross-site form post can't trigger them.
     if (req.method !== 'GET' && !String(req.headers['content-type'] || '').startsWith('application/json')) {
       fail(415, 'Send JSON');

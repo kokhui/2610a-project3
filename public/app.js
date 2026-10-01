@@ -112,7 +112,18 @@ async function route() {
     app.innerHTML = `<div class="card empty"><p>${esc(e.message)}</p><a class="btn" href="#/">Back to home</a></div>`;
   }
 }
-window.addEventListener('hashchange', route);
+// After a navigation the old view is gone, so move focus somewhere sensible:
+// the selected tab when switching tabs in a group, otherwise the view's heading.
+window.addEventListener('hashchange', async (e) => {
+  const view = (url) => new URL(url).hash.replace(/^(#\/g\/\d+).*/, '$1');
+  await route();
+  const target = view(e.oldURL) === view(e.newURL)
+    ? $('[role=tab][aria-selected="true"]')
+    : $('h1', app);
+  if (!target) return;
+  if (target.tagName === 'H1') target.tabIndex = -1;
+  target.focus();
+});
 
 $('#logout').addEventListener('click', async () => {
   await api('POST', '/api/logout').catch(() => {});
@@ -178,13 +189,25 @@ function renderAuth() {
 // ---------- home ----------
 
 async function renderHome() {
-  const [{ groups }, { friends }] = await Promise.all([api('GET', '/api/groups'), api('GET', '/api/friends')]);
+  const [{ groups }, { friends }, { invites }] = await Promise.all([api('GET', '/api/groups'), api('GET', '/api/friends'), api('GET', '/api/invites')]);
   // Totals are netted per friend across groups, so owing Bob 100 in one group and being owed 150 in another counts as +50.
   const owe = friends.reduce((a, f) => a + Math.min(f.netCents, 0), 0);
   const owed = friends.reduce((a, f) => a + Math.max(f.netCents, 0), 0);
 
   app.innerHTML = `
     <h1>Hi, ${esc(me.displayName)}</h1>
+    ${invites.length ? `<div class="card">
+      <h2>Group invites</h2>
+      <p class="muted small">Joining shares your name and mobile number with the group.</p>
+      <ul class="list">${invites.map((inv) => `
+        <li class="row wrap">
+          <span class="avatar">${esc(initials(inv.groupName))}</span>
+          <span class="grow"><strong>${esc(inv.groupName)}</strong><br>
+            <span class="muted small">from ${esc(inv.invitedBy.displayName)} (@${esc(inv.invitedBy.username)})</span></span>
+          <button class="small" data-decline="${inv.groupId}">Decline</button>
+          <button class="small primary" data-accept="${inv.groupId}">Join</button>
+        </li>`).join('')}</ul>
+    </div>` : ''}
     <div class="summary">
       <div class="card"><div class="muted small">You owe</div><div class="big num ${owe ? 'owe' : ''}">${money(owe)}</div></div>
       <div class="card"><div class="muted small">You're owed</div><div class="big num ${owed ? 'owed' : ''}">${money(owed)}</div></div>
@@ -224,6 +247,13 @@ async function renderHome() {
       : `<div class="empty"><p>No groups yet.</p><p class="small">Make one for your makan kakis, then share the invite code.</p></div>`}
     </div>`;
 
+  $$('[data-accept]').forEach((b) => b.addEventListener('click', async () => {
+    try { const { id } = await api('POST', `/api/invites/${b.dataset.accept}/accept`); location.hash = `#/g/${id}`; }
+    catch (ex) { toast(ex.message); }
+  }));
+  $$('[data-decline]').forEach((b) => b.addEventListener('click', () => {
+    act(() => api('POST', `/api/invites/${b.dataset.decline}/decline`), 'Invite declined', renderHome);
+  }));
   $$('[data-settle-friend]').forEach((b) => b.addEventListener('click', () => settleFriendSheet(friends[b.dataset.settleFriend], renderHome)));
   $$('[data-remind-friend]').forEach((b) => b.addEventListener('click', () => {
     const f = friends[b.dataset.remindFriend];
@@ -375,12 +405,17 @@ function renderBillsTab(body, { id, expenses, settlements, name, myBal, reload }
         <span class="muted small">${fmtDate(e.spentOn)} · ${esc(name(e.paidBy))} paid ${money(e.amountCents)}</span><br>
         <span class="muted small">Split: ${split}</span>${runningLine(it)}</span>
       <span class="amount num small">${balanceSpan(it.myNet, { pos: (a) => `you lent ${a}`, neg: (a) => `you borrowed ${a}`, zero: 'not involved' })}<br>
-        ${[e.paidBy, e.createdBy].includes(me.id) ? `<button class="link small" data-del="${e.id}">Delete</button>` : ''}</span></li>`;
+        ${[e.paidBy, e.createdBy].includes(me.id) ? `<button class="link small" data-del="${e.id}">Delete</button>`
+          : e.shares.some((s) => s.userId === me.id) ? `<button class="link small" data-leave-bill="${e.id}">Take me off</button>` : ''}</span></li>`;
   }).join('')}</ul>` : `<div class="empty"><p>No bills yet.</p><p class="small">Tap <strong>+ Add bill</strong> right after someone pays, so nobody forgets the amount.</p></div>`}</div>`;
 
   $$('[data-del]', body).forEach((b) => b.addEventListener('click', () => {
     if (!confirm('Delete this bill? Everyone\'s balances will change.')) return;
     act(() => api('DELETE', `/api/groups/${id}/expenses/${b.dataset.del}`), 'Bill deleted', reload);
+  }));
+  $$('[data-leave-bill]', body).forEach((b) => b.addEventListener('click', () => {
+    if (!confirm('Take yourself off this bill? Your share comes off the total, so the payer covers it.')) return;
+    act(() => api('POST', `/api/groups/${id}/expenses/${b.dataset.leaveBill}/leave`), "You're off this bill", reload);
   }));
   $$('[data-undo]', body).forEach((b) => b.addEventListener('click', () => {
     if (!confirm('Undo this repayment?')) return;
@@ -388,7 +423,7 @@ function renderBillsTab(body, { id, expenses, settlements, name, myBal, reload }
   }));
 }
 
-function renderPeopleTab(body, { id, group, members, reload }) {
+function renderPeopleTab(body, { id, group, members, invited, reload }) {
   const joinLink = `${location.origin}${location.pathname}#/join/${group.inviteCode}`;
   body.innerHTML = `
     <div class="card">
@@ -400,9 +435,10 @@ function renderPeopleTab(body, { id, group, members, reload }) {
         <button class="small" id="copy-link">Copy invite link</button>
       </div>
       <form id="add-member" class="row" style="margin-top:1rem">
-        <input name="username" placeholder="Or add by username" autocapitalize="none" aria-label="Username to add" required>
-        <button class="primary">Add</button>
+        <input name="username" placeholder="Or invite by username" autocapitalize="none" aria-label="Username to invite" required>
+        <button class="primary">Invite</button>
       </form>
+      <p class="muted small" style="margin:.4rem 0 0">They'll see the invite on their home page and choose whether to join.</p>
     </div>
     <div class="card">
       <h2>People</h2>
@@ -411,7 +447,10 @@ function renderPeopleTab(body, { id, group, members, reload }) {
           <span class="grow">${esc(m.displayName)}${m.id === me.id ? ' <span class="pill">you</span>' : ''}${m.id === group.createdBy ? ' <span class="pill">creator</span>' : ''}<br>
             <span class="muted small">@${esc(m.username)}</span></span>
           ${m.id === me.id || group.createdBy === me.id ? `<button class="small danger" data-remove="${m.id}">${m.id === me.id ? 'Leave' : 'Remove'}</button>` : ''}
-        </li>`).join('')}</ul>
+        </li>`).join('')}${invited.map((u) => `
+        <li class="row"><span class="avatar">${esc(initials(u.displayName))}</span>
+          <span class="grow">${esc(u.displayName)} <span class="pill">invited</span><br>
+            <span class="muted small">@${esc(u.username)}</span></span></li>`).join('')}</ul>
     </div>
     <div class="card">
       <h2>Rename group</h2>
@@ -421,7 +460,7 @@ function renderPeopleTab(body, { id, group, members, reload }) {
   $('#copy-link').addEventListener('click', () => copy(`Join "${group.name}" on SplitLah: ${joinLink}`, 'Invite link copied'));
   $('#add-member').addEventListener('submit', (e) => {
     e.preventDefault();
-    act(() => api('POST', `/api/groups/${id}/members`, { username: new FormData(e.target).get('username') }), 'Added', reload);
+    act(() => api('POST', `/api/groups/${id}/members`, { username: new FormData(e.target).get('username') }), 'Invite sent', reload);
   });
   $('#rename').addEventListener('submit', (e) => {
     e.preventDefault();
