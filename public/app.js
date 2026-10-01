@@ -167,9 +167,10 @@ function renderAuth() {
 // ---------- home ----------
 
 async function renderHome() {
-  const { groups } = await api('GET', '/api/groups');
-  const owe = groups.reduce((a, g) => a + Math.min(g.myBalanceCents, 0), 0);
-  const owed = groups.reduce((a, g) => a + Math.max(g.myBalanceCents, 0), 0);
+  const [{ groups }, { friends }] = await Promise.all([api('GET', '/api/groups'), api('GET', '/api/friends')]);
+  // Totals are netted per friend across groups, so owing Bob 100 in one group and being owed 150 in another counts as +50.
+  const owe = friends.reduce((a, f) => a + Math.min(f.netCents, 0), 0);
+  const owed = friends.reduce((a, f) => a + Math.max(f.netCents, 0), 0);
 
   app.innerHTML = `
     <h1>Hi, ${esc(me.displayName)}</h1>
@@ -177,6 +178,24 @@ async function renderHome() {
       <div class="card"><div class="muted small">You owe</div><div class="big num ${owe ? 'owe' : ''}">${money(owe)}</div></div>
       <div class="card"><div class="muted small">You're owed</div><div class="big num ${owed ? 'owed' : ''}">${money(owed)}</div></div>
     </div>
+    ${friends.length ? `<div class="card">
+      <h2>With each friend</h2>
+      <p class="muted small">All your groups combined, so what you owe a friend in one group cancels out what they owe you in another.</p>
+      <ul class="list">${friends.map((f, i) => `
+        <li>
+          <div class="row">
+            <span class="avatar">${esc(initials(f.displayName))}</span>
+            <span class="grow"><strong>${esc(f.displayName)}</strong><br>
+              <span class="muted small">${f.groups.map((g) => `${esc(g.name)}: ${g.cents > 0 ? 'owes you' : 'you owe'} ${money(g.cents)}`).join(' · ')}</span></span>
+            <span class="amount num">${f.netCents > 0 ? `<span class="owed">owes you ${money(f.netCents)}</span>`
+              : f.netCents < 0 ? `<span class="owe">you owe ${money(f.netCents)}</span>` : '<span class="muted">evens out</span>'}</span>
+          </div>
+          <div class="row wrap" style="margin-top:.5rem;padding-left:50px">
+            <button class="small primary" data-settle-friend="${i}">${f.netCents > 0 ? `Got ${money(f.netCents)} back` : f.netCents < 0 ? `I paid ${money(f.netCents)}` : 'Clear it'}</button>
+            ${f.netCents > 0 ? `<button class="small" data-remind-friend="${i}">Send reminder</button>` : ''}
+          </div>
+        </li>`).join('')}</ul>
+    </div>` : ''}
     <div class="card">
       <div class="row between" style="margin-bottom:.5rem">
         <h2 style="margin:0">Your groups</h2>
@@ -194,6 +213,12 @@ async function renderHome() {
         </a></li>`).join('')}</ul>`
       : `<div class="empty"><p>No groups yet.</p><p class="small">Make one for your makan kakis, then share the invite code.</p></div>`}
     </div>`;
+
+  $$('[data-settle-friend]').forEach((b) => b.addEventListener('click', () => settleFriendSheet(friends[b.dataset.settleFriend], renderHome)));
+  $$('[data-remind-friend]').forEach((b) => b.addEventListener('click', () => {
+    const f = friends[b.dataset.remindFriend];
+    remindSheet(f, f.netCents, f.groups.length > 1 ? `across ${f.groups.map((g) => `"${g.name}"`).join(' and ')}` : `for "${f.groups[0].name}"`, []);
+  }));
 
   $('#new-group').addEventListener('click', () => openSheet(`
     <h2>New group</h2>
@@ -284,31 +309,61 @@ async function renderGroup(id, tab) {
         </ul>
       </div>`;
     $$('[data-settle]', body).forEach((b) => b.addEventListener('click', () => settleSheet(group, transfers[b.dataset.settle], name, reload)));
-    $$('[data-remind]', body).forEach((b) => b.addEventListener('click', () => remindSheet(data, transfers[b.dataset.remind], byId)));
+    $$('[data-remind]', body).forEach((b) => b.addEventListener('click', () => {
+      const t = transfers[b.dataset.remind];
+      const recent = expenses
+        .filter((e) => e.paidBy === me.id && e.shares.some((s) => s.userId === t.from))
+        .slice(0, 3)
+        .map((e) => `• ${e.description} (${fmtDate(e.spentOn)}): ${money(e.shares.find((s) => s.userId === t.from).shareCents)}`);
+      remindSheet(byId.get(t.from), t.amountCents, `for "${group.name}"`, recent);
+    }));
   }
 
   if (tab === 'bills') {
     const items = [
       ...expenses.map((e) => ({ kind: 'bill', date: e.spentOn, sortKey: e.spentOn + e.createdAt, e })),
       ...settlements.map((s) => ({ kind: 'pay', date: s.createdAt, sortKey: s.createdAt.slice(0, 10) + s.createdAt, s })),
-    ].sort((a, b) => b.sortKey.localeCompare(a.sortKey));
-    body.innerHTML = `<div class="card">${items.length ? `<ul class="list">${items.map((it) => {
+    ].sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+    // Walk oldest to newest so each row can show your running balance, then display newest first.
+    let running = 0;
+    for (const it of items) {
+      it.myNet = it.kind === 'bill'
+        ? (it.e.paidBy === me.id ? it.e.amountCents : 0) - (it.e.shares.find((s) => s.userId === me.id)?.shareCents || 0)
+        : (it.s.from === me.id ? it.s.amountCents : 0) - (it.s.to === me.id ? it.s.amountCents : 0);
+      running += it.myNet;
+      it.running = running;
+    }
+    items.reverse();
+    const signed = (c) => (c > 0 ? '+' : c < 0 ? '−' : '') + money(c);
+    const runningLine = (it) => it.myNet
+      ? `<br><span class="small">Your balance: <span class="muted">${signed(it.running - it.myNet)}</span> → <strong class="num ${it.running > 0 ? 'owed' : it.running < 0 ? 'owe' : ''}">${signed(it.running)}</strong></span>`
+      : '';
+    const bills = items.filter((it) => it.kind === 'bill').length;
+    const pays = items.length - bills;
+    body.innerHTML = `
+      ${items.length ? `<div class="card">
+        <div class="row between"><h2 style="margin:0">Your balance here</h2>
+          <strong class="num" style="font-size:1.3rem">${myBal > 0 ? `<span class="owed">+${money(myBal)}</span>` : myBal < 0 ? `<span class="owe">−${money(myBal)}</span>` : '<span class="muted">S$0.00</span>'}</strong></div>
+        <p class="muted small" style="margin:.4rem 0 0">All ${bills} ${bills === 1 ? 'bill' : 'bills'}${pays ? ` and ${pays} ${pays === 1 ? 'repayment' : 'repayments'}` : ''} added together:
+          what you paid for others minus what others paid for you. ${myBal > 0 ? 'Positive means the group owes you.' : myBal < 0 ? 'Negative means you owe the group.' : ''}
+          Each row shows how it moved your balance.</p>
+      </div>` : ''}
+      <div class="card">${items.length ? `<ul class="list">${items.map((it) => {
       if (it.kind === 'pay') {
         const s = it.s;
         return `<li class="row"><span class="avatar" aria-hidden="true">💸</span>
           <span class="grow"><strong>${esc(name(s.from))}</strong> paid <strong>${esc(name(s.to))}</strong><br>
-            <span class="muted small">${fmtDate(s.createdAt)} · repayment</span></span>
+            <span class="muted small">${fmtDate(s.createdAt)} · ${s.note === 'Combined settle-up' ? 'cleared in a combined settle-up' : 'repayment'}</span>${runningLine(it)}</span>
           <span class="amount num">${money(s.amountCents)}<br>
             ${[s.from, s.to].includes(me.id) ? `<button class="link small" data-undo="${s.id}">Undo</button>` : ''}</span></li>`;
       }
       const e = it.e;
-      const myShare = e.shares.find((s) => s.userId === me.id)?.shareCents || 0;
-      const myNet = (e.paidBy === me.id ? e.amountCents : 0) - myShare;
+      const myNet = it.myNet;
       const split = e.shares.map((s) => `${esc(name(s.userId))} ${money(s.shareCents)}`).join(', ');
       return `<li class="row"><span class="avatar" aria-hidden="true">🧾</span>
         <span class="grow"><strong>${esc(e.description)}</strong><br>
           <span class="muted small">${fmtDate(e.spentOn)} · ${esc(name(e.paidBy))} paid ${money(e.amountCents)}</span><br>
-          <span class="muted small">Split: ${split}</span></span>
+          <span class="muted small">Split: ${split}</span>${runningLine(it)}</span>
         <span class="amount num small">${myNet > 0 ? `<span class="owed">you lent ${money(myNet)}</span>`
           : myNet < 0 ? `<span class="owe">you borrowed ${money(myNet)}</span>` : '<span class="muted">not involved</span>'}<br>
           ${[e.paidBy, e.createdBy].includes(me.id) ? `<button class="link small" data-del="${e.id}">Delete</button>` : ''}</span></li>`;
@@ -461,13 +516,33 @@ function settleSheet(group, t, name, done) {
   });
 }
 
-function remindSheet({ group, expenses }, t, byId) {
-  const debtor = byId.get(t.from);
-  const recent = expenses
-    .filter((e) => e.paidBy === me.id && e.shares.some((s) => s.userId === t.from))
-    .slice(0, 3)
-    .map((e) => `• ${e.description} (${fmtDate(e.spentOn)}): ${money(e.shares.find((s) => s.userId === t.from).shareCents)}`);
-  const msg = `Hi ${debtor.displayName}! Friendly reminder from SplitLah: you owe me ${money(t.amountCents)} for "${group.name}".`
+// Combined settle-up with one friend: the server records one repayment in each shared group.
+function settleFriendSheet(f, done) {
+  const n = f.groups.length;
+  const what = f.netCents > 0 ? `${esc(f.displayName)} pays you <strong>${money(f.netCents)}</strong>`
+    : f.netCents < 0 ? `You pay ${esc(f.displayName)} <strong>${money(f.netCents)}</strong>`
+    : `You and ${esc(f.displayName)} owe each other the same amount, so no money changes hands`;
+  openSheet(`
+    <h2>Settle up with ${esc(f.displayName)}</h2>
+    <p>${what}.</p>
+    <ul class="list small" style="margin-bottom:.75rem">${f.groups.map((g) => `
+      <li class="row between"><span>${esc(g.name)}</span>
+        <span class="num ${g.cents > 0 ? 'owed' : 'owe'}">${g.cents > 0 ? '+' : '−'}${money(g.cents)}</span></li>`).join('')}
+      <li class="row between"><strong>Combined</strong><strong class="num">${f.netCents > 0 ? '+' : f.netCents < 0 ? '−' : ''}${money(f.netCents)}</strong></li>
+    </ul>
+    <p class="muted small">${n > 1 ? `This records a repayment in each of the ${n} groups, so all of them clear.` : 'This records the repayment in the group.'}
+      Only do this once the money has actually changed hands.</p>
+    <div class="error"></div>
+    <div class="sheet-actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary">Settle all</button></div>`,
+  async () => {
+    await api('POST', `/api/friends/${f.id}/settle`, { expectedCents: f.netCents });
+    toast(`All square with ${f.displayName}`);
+    done();
+  });
+}
+
+function remindSheet(debtor, amountCents, context, recent) {
+  const msg = `Hi ${debtor.displayName}! Friendly reminder from SplitLah: you owe me ${money(amountCents)} ${context}.`
     + (recent.length ? `\n\n${recent.join('\n')}` : '')
     + (me.phone ? `\n\nPayNow to ${me.phone}. Thanks!` : '\n\nThanks!');
   let phone = (debtor.phone || '').replace(/\D/g, '');

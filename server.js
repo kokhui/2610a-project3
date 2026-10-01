@@ -71,11 +71,17 @@ db.exec(`
     to_user      INTEGER NOT NULL REFERENCES users(id),
     amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
     created_by   INTEGER NOT NULL REFERENCES users(id),
-    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    note         TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_expenses_group ON expenses(group_id);
   CREATE INDEX IF NOT EXISTS idx_settlements_group ON settlements(group_id);
 `);
+
+// Databases created by the first draft lack settlements.note.
+if (!db.prepare('PRAGMA table_info(settlements)').all().some((c) => c.name === 'note')) {
+  db.exec('ALTER TABLE settlements ADD COLUMN note TEXT');
+}
 
 const q = (sql) => db.prepare(sql);
 
@@ -183,6 +189,27 @@ function suggestTransfers(bal) {
   return out;
 }
 
+// What each friend owes the user (positive) or is owed (negative), netted across every shared group.
+// Built from each group's settle-up transfers so it matches what the group pages show.
+function friendBalances(userId) {
+  const groups = q(`SELECT g.id, g.name FROM groups g JOIN members m ON m.group_id = g.id
+                    WHERE m.user_id = ? ORDER BY g.created_at`).all(userId);
+  const friends = new Map();
+  for (const g of groups) {
+    for (const t of suggestTransfers(groupBalances(g.id))) {
+      let other, cents;
+      if (t.to === userId) { other = t.from; cents = t.amountCents; }
+      else if (t.from === userId) { other = t.to; cents = -t.amountCents; }
+      else continue;
+      if (!friends.has(other)) friends.set(other, { cents: 0, groups: [] });
+      const f = friends.get(other);
+      f.cents += cents;
+      f.groups.push({ id: g.id, name: g.name, cents });
+    }
+  }
+  return friends;
+}
+
 // ---------- route handlers ----------
 
 function requireMember(groupId, userId) {
@@ -263,6 +290,30 @@ route('GET', '/api/groups', ({ user }) => {
   };
 });
 
+route('GET', '/api/friends', ({ user }) => {
+  const friends = friendBalances(user.id);
+  const users = q('SELECT * FROM users WHERE id = ?');
+  return {
+    friends: [...friends].map(([uid, f]) => ({ ...publicUser(users.get(uid)), netCents: f.cents, groups: f.groups }))
+      .sort((a, b) => Math.abs(b.netCents) - Math.abs(a.netCents)),
+  };
+});
+
+// Clears everything between the user and one friend: one repayment per shared group, so every group zeroes out.
+// expectedCents guards against settling numbers the user never saw.
+route('POST', '/api/friends/:uid/settle', ({ user, params, body }) => tx(() => {
+  const f = friendBalances(user.id).get(params.uid);
+  if (!f) fail(404, 'Nothing to settle with this person');
+  if (Number(body.expectedCents) !== f.cents) fail(409, 'Balances changed since you looked. Refresh and try again.');
+  const ins = q(`INSERT INTO settlements (group_id, from_user, to_user, amount_cents, created_by, note)
+                 VALUES (?, ?, ?, ?, ?, 'Combined settle-up')`);
+  for (const g of f.groups) {
+    const [from, to] = g.cents > 0 ? [params.uid, user.id] : [user.id, params.uid];
+    ins.run(g.id, from, to, Math.abs(g.cents), user.id);
+  }
+  return { cleared: f.groups.length };
+}));
+
 route('POST', '/api/groups', ({ user, body }) => {
   const name = cleanText(body.name, 'Group name', 60);
   return tx(() => {
@@ -298,6 +349,7 @@ route('GET', '/api/groups/:id', ({ user, params }) => {
   }));
   const settlements = q('SELECT * FROM settlements WHERE group_id = ? ORDER BY id DESC').all(g.id).map((s) => ({
     id: s.id, from: s.from_user, to: s.to_user, amountCents: s.amount_cents, createdBy: s.created_by, createdAt: s.created_at,
+    note: s.note || '',
   }));
   const bal = groupBalances(g.id);
   return {
