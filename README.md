@@ -27,6 +27,15 @@ The database is a single SQLite file at `data/splitlah.db`, created on first run
 | `DB_FILE`  | `data/splitlah.db`  | SQLite database path                            |
 | `NODE_ENV` | (unset)             | Set to `production` behind HTTPS for `Secure` cookies |
 
+## Tests
+
+```sh
+npm test            # run the API tests
+npm run coverage    # same, with a line/branch coverage report for server.js
+```
+
+The tests (in `test/`) use Node's built-in `node:test`, so there is still nothing to install. Each test file starts a real `server.js` on a free port with a throwaway database and calls the API over HTTP.
+
 ## Using it with friends
 
 Friends need to reach the server. Some options:
