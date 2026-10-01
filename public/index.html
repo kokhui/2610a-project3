@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SplitLah</title>
+  <meta name="description" content="Track who paid for what when you hang out, and who still owes whom.">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/"><img src="icon.svg" alt="" width="28" height="28"> SplitLah</a>
+    <nav id="nav" hidden>
+      <a href="#/profile" id="nav-user"></a>
+      <button type="button" class="link" id="logout">Log out</button>
+    </nav>
+  </header>
+  <main id="app" aria-live="polite"></main>
+  <div id="toast" role="status" hidden></div>
+
+  <dialog id="sheet">
+    <form method="dialog" id="sheet-body"></form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
