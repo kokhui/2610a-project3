@@ -39,7 +39,7 @@ GitHub Pages won't work, because it only serves static files and this app needs 
 ## How it works
 
 - `server.js`: the HTTP server, JSON API, auth and SQLite schema.
-- `public/`: the single-page frontend (`index.html`, `app.js`, `style.css`), with hash routes `#/`, `#/g/<id>`, `#/profile` and `#/join/<code>`.
+- `public/`: the single-page frontend (`index.html`, `app.js`, `style.css`) plus `shared.js`, the amount parser and length limits that `server.js` also `require`s, with hash routes `#/`, `#/g/<id>`, `#/profile` and `#/join/<code>`.
 
 Money is stored as integer cents. When a bill splits equally, any leftover cents go to the first few people, so the shares always add up to the total. Balances are worked out from the bills and repayments each time, not stored. The "settle up" list pairs the biggest debtor with the biggest creditor, which needs at most *n − 1* payments.
 

@@ -6,12 +6,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const { parseCents, MAX, MIN_PASSWORD } = require('./public/shared.js');
 
 const PORT = Number(process.env.PORT) || 3000;
 const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'data', 'splitlah.db');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const SESSION_DAYS = 30;
 const SECURE_COOKIE = process.env.NODE_ENV === 'production';
+const COMBINED_NOTE = 'Combined settle-up'; // settlements.note for rows made by a friend settle-up
 
 // ---------- database ----------
 
@@ -116,12 +118,10 @@ function hashPassword(password, salt) {
 }
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
-// "12.5" -> 1250. Avoids float rounding by parsing the string.
 function toCents(value) {
-  const s = String(value ?? '').trim();
-  const m = /^(\d{1,7})(?:\.(\d{1,2}))?$/.exec(s);
-  if (!m) fail(400, 'Enter an amount like 12.50');
-  return Number(m[1]) * 100 + Number((m[2] || '').padEnd(2, '0'));
+  const cents = parseCents(value);
+  if (Number.isNaN(cents)) fail(400, 'Enter an amount like 12.50');
+  return cents;
 }
 
 function newInviteCode() {
@@ -255,9 +255,9 @@ const route = (method, pattern, handler, { auth = true } = {}) => {
 route('POST', '/api/register', ({ body, res }) => {
   const username = cleanText(body.username, 'Username', 30).toLowerCase();
   if (!/^[a-z0-9_.]{3,30}$/.test(username)) fail(400, 'Username: 3-30 letters, numbers, _ or .');
-  const displayName = cleanText(body.displayName || username, 'Display name', 40);
+  const displayName = cleanText(body.displayName || username, 'Display name', MAX.displayName);
   const password = String(body.password || '');
-  if (password.length < 6) fail(400, 'Password must be at least 6 characters');
+  if (password.length < MIN_PASSWORD) fail(400, `Password must be at least ${MIN_PASSWORD} characters`);
   if (q('SELECT 1 FROM users WHERE username = ?').get(username)) fail(409, 'That username is taken');
   const salt = crypto.randomBytes(16).toString('hex');
   const { lastInsertRowid } = q('INSERT INTO users (username, display_name, pass_hash, salt) VALUES (?, ?, ?, ?)')
@@ -286,7 +286,7 @@ route('POST', '/api/logout', ({ req, res }) => {
 route('GET', '/api/me', ({ user }) => ({ user: publicUser(user) }));
 
 route('PATCH', '/api/me', ({ user, body }) => {
-  const displayName = cleanText(body.displayName, 'Display name', 40);
+  const displayName = cleanText(body.displayName, 'Display name', MAX.displayName);
   const phone = String(body.phone || '').replace(/[^\d+]/g, '').slice(0, 16);
   q('UPDATE users SET display_name = ?, phone = ? WHERE id = ?').run(displayName, phone, user.id);
   return { user: publicUser(q('SELECT * FROM users WHERE id = ?').get(user.id)) };
@@ -320,16 +320,16 @@ route('POST', '/api/friends/:uid/settle', ({ user, params, body }) => tx(() => {
   if (!f) fail(404, 'Nothing to settle with this person');
   if (Number(body.expectedCents) !== f.cents) fail(409, 'Balances changed since you looked. Refresh and try again.');
   const ins = q(`INSERT INTO settlements (group_id, from_user, to_user, amount_cents, created_by, note)
-                 VALUES (?, ?, ?, ?, ?, 'Combined settle-up')`);
+                 VALUES (?, ?, ?, ?, ?, ?)`);
   for (const g of f.groups) {
     const [from, to] = g.cents > 0 ? [params.uid, user.id] : [user.id, params.uid];
-    ins.run(g.id, from, to, Math.abs(g.cents), user.id);
+    ins.run(g.id, from, to, Math.abs(g.cents), user.id, COMBINED_NOTE);
   }
   return { cleared: f.groups.length };
 }));
 
 route('POST', '/api/groups', ({ user, body }) => {
-  const name = cleanText(body.name, 'Group name', 60);
+  const name = cleanText(body.name, 'Group name', MAX.groupName);
   return tx(() => {
     const { lastInsertRowid } = q('INSERT INTO groups (name, invite_code, created_by) VALUES (?, ?, ?)')
       .run(name, newInviteCode(), user.id);
@@ -382,7 +382,7 @@ route('GET', '/api/groups/:id', ({ user, params }) => {
   }));
   const settlements = q('SELECT * FROM settlements WHERE group_id = ? ORDER BY id DESC').all(g.id).map((s) => ({
     id: s.id, from: s.from_user, to: s.to_user, amountCents: s.amount_cents, createdBy: s.created_by, createdAt: s.created_at,
-    note: s.note || '',
+    combined: s.note === COMBINED_NOTE,
   }));
   const invited = q(`SELECT u.username, u.display_name FROM invites i JOIN users u ON u.id = i.user_id
                      WHERE i.group_id = ? ORDER BY i.created_at`).all(g.id)
@@ -398,7 +398,7 @@ route('GET', '/api/groups/:id', ({ user, params }) => {
 
 route('PATCH', '/api/groups/:id', ({ user, params, body }) => {
   const g = requireMember(params.id, user.id);
-  q('UPDATE groups SET name = ? WHERE id = ?').run(cleanText(body.name, 'Group name', 60), g.id);
+  q('UPDATE groups SET name = ? WHERE id = ?').run(cleanText(body.name, 'Group name', MAX.groupName), g.id);
   return { ok: true };
 });
 
@@ -427,7 +427,7 @@ route('DELETE', '/api/groups/:id/members/:uid', ({ user, params }) => {
 route('POST', '/api/groups/:id/expenses', ({ user, params, body }) => {
   const g = requireMember(params.id, user.id);
   const ids = memberIds(g.id);
-  const description = cleanText(body.description, 'Description', 80);
+  const description = cleanText(body.description, 'Description', MAX.description);
   const amount = toCents(body.amount);
   const paidBy = Number(body.paidBy);
   if (!ids.has(paidBy)) fail(400, 'The payer must be in the group');
