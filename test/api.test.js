@@ -451,6 +451,14 @@ describe('http plumbing', () => {
     assert.equal(r.data.error, 'Send JSON');
   });
 
+  test('a body over 100 KB gets a 413, not a dropped connection', async () => {
+    const r = await client(base).post('/api/login', undefined, { raw: JSON.stringify({ username: 'x'.repeat(200_000) }) });
+    assert.equal(r.status, 413);
+    assert.equal(r.data.error, 'Request too large');
+    assert.equal(r.headers.get('connection'), 'close');
+    assert.equal((await client(base).post('/api/login', {})).status, 401); // server still fine
+  });
+
   test('invalid JSON is a 400', async () => {
     const r = await client(base).post('/api/login', undefined, { raw: '{nope' });
     assert.equal(r.status, 400);
