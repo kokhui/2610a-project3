@@ -288,6 +288,10 @@ describe('expenses', () => {
       [{ ...ok, splitAmong: [] }, 'Pick at least one person to split with'],
       [{ ...ok, splitAmong: [b.user.id] }, 'Pick at least one person to split with'],
       [{ ...ok, splitMode: 'exact', shares: { [a.user.id]: 'abc' } }, 'Enter an amount like 12.50'],
+      [{ ...ok, splitAmong: String(a.user.id) }, 'Pick at least one person to split with'],
+      [{ ...ok, splitAmong: { 0: a.user.id } }, 'Pick at least one person to split with'],
+      [{ ...ok, amount: '10', splitMode: 'exact', shares: { [a.user.id]: '5', [`0${a.user.id}`]: '5' } },
+        'Each person can only be in the split once'],
     ];
     for (const [body, error] of cases) {
       const r = await a.post(url, body);
@@ -455,6 +459,16 @@ describe('http plumbing', () => {
     const r = await client(base).post('/api/login', undefined, { raw: '{nope' });
     assert.equal(r.status, 400);
     assert.equal(r.data.error, 'Invalid JSON');
+  });
+
+  test('a JSON body that is not an object is a 400', async () => {
+    const c = await newUser(base);
+    for (const raw of ['null', '[]', '"Trip"', '42', 'true']) {
+      const r = await c.post('/api/groups', undefined, { raw });
+      assert.equal(r.status, 400, raw);
+      assert.equal(r.data.error, 'Send a JSON object');
+    }
+    assert.deepEqual((await c.get('/api/groups')).data.groups, []);
   });
 
   test('an empty body counts as {}', async () => {
